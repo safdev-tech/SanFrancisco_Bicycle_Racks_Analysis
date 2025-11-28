@@ -1,0 +1,567 @@
+---
+title: "San Francisco Bicycle Racks Analysis"
+author: "Franck Sombo"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    css: "styles.css"
+    dependencies:
+      - name: dt-core
+      - name: dt-buttons
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+# San Francisco Bicycle Racks Analysis{.tabset}
+
+
+```{r packages-installation, include=FALSE}
+# install.packages("tidyverse")
+#install.packages("lubridate")
+#install.packages("RSQLite")
+```
+
+
+```{r library-load, include=FALSE}
+# Loading libraries
+library(tidyverse)
+library(lubridate)
+library(corrplot)
+library(forecast)
+library(kableExtra)
+library(RSQLite)
+library(leaflet)
+library(DT)
+```
+
+## Introduction
+
+<p>This report analyzes the bicycle parking racks dataset, focusing on three hypotheses: <br>
+1. The number of bicycle parking racks installed has increased over time. <br>
+2. Neighborhoods with higher population density or commercial activity have more racks installed. <br>
+3. Bicycle racks are more frequently installed during certain months, aligning with cycling-friendly weather. </p>
+
+<p>This analysis explores the bicycle rack installations across San Francisco, examining installation patterns, geographical distribution, and temporal trends. 
+The data is sourced from San Francisco Open Data Portal. 
+
+<p>The dataset contains information about public bicycle parking installations, including location details, installation dates, and capacity information. 
+This analysis aims to: <br>
+- Understand the spatial distribution of bicycle racks <br>
+- Analyze installation trends over time <br>
+- Identify patterns in rack placement and neighborhood distribution <br>
+- Forecast future installation needs. </p>
+
+### Data Loading and Preview
+
+```{r data_prep, message=FALSE, echo=FALSE, warning=FALSE}
+# Read and clean data
+bicycle_df <- read.csv("Bicycle_Parking_Racks_20241211.csv")
+
+
+```
+
+
+```{r data_preview, echo=FALSE}
+
+datatable(head(bicycle_df, 10),
+          options = list(
+            pageLength = 5,
+            scrollX = TRUE,
+            dom = 'Bfrtip',
+            buttons = c('copy', 'csv', 'excel', 'pdf')
+          ),
+          caption = "Table 1: First 10 rows of Bicycle Racks Data")
+```
+
+### Data Preparation
+
+```{r data_cleaning, message=FALSE, echo=FALSE, warning=FALSE, include=FALSE}
+# Cleaning the data
+
+bicycle_sf <- bicycle_df %>%
+  mutate(PLACEMENT = as.factor(PLACEMENT), INSTALL_MO = ifelse(INSTALL_MO == 0, 1, INSTALL_MO),
+    INSTALL_DATE = make_date(INSTALL_YR, INSTALL_MO, 1)) %>% 
+  select(-LAT, -LON) %>% 
+  mutate(coords = str_extract(shape, "\\((.+?)\\)"),
+    coords = str_remove_all(coords, "[\\(\\)]"),
+    LON = as.numeric(sapply(strsplit(coords, " "), `[`, 1)),
+    LAT = as.numeric(sapply(strsplit(coords, " "), `[`, 2))) %>%
+  select(-shape, -coords) %>% 
+  filter(!is.na(INSTALL_YR))
+
+bicycle_sf
+```
+
+The dataset required cleaning to handle missing values and incorrect dates. By imputing or removing invalid entries and converting dates appropriately, the dataset is now suitable for detailed analysis, as minimal missing values will help to ensure reliable conclusions.
+
+```{r checking-missing-values, include=FALSE, echo=FALSE, warning=FALSE, include=FALSE}
+
+# Missing values analysis
+missing_values <- sapply(bicycle_sf, function(x) sum(is.na(x)))
+missing_bicycle_sf <- data.frame(
+  Column = names(missing_values),
+  Missing_Count = missing_values,
+  Missing_Percentage = round(missing_values/nrow(bicycle_sf)*100, 2)
+) %>%
+arrange(desc(Missing_Count))
+
+# Display missing values
+missing_bicycle_sf
+```
+
+```{r reshaping-dataset, include=FALSE, echo=FALSE, warning=FALSE}
+#Reshaping the dataset to keep relevant data for analysis
+bicycle_sf <- bicycle_sf %>% 
+  select(-GLOBALID,
+         -Central.Market.Tenderloin.Boundary.Polygon...Updated.2,
+         -CBD..BID.and.GBD.Boundaries.as.of.2017.2, 
+         -Current.Police.Districts.2,
+         -SF.Find.Neighborhoods.2,
+         -Current.Supervisor.Districts.2,
+         -Analysis.Neighborhoods.2,
+         -Analysis.Neighborhoods...2010.census.tracts.assigned.to.neighborhoods.2
+)
+
+```
+
+
+<p>The dataset underwent several cleaning steps, including:
+- Standardized date formats using lubridate <br>
+- Extracted coordinates from shape field <br>
+- Removed records with missing installation years <br>
+- Converted categorical variables to factors. <br>
+Based on this, the data was cleaned and unwated columns removed to facilitate relevant analysis. </p>
+
+## Bicycle Racks Map
+
+The map highlights the concentration of bicycle rack installations across San Francisco. Most racks are clustered in central and high-traffic areas, such as downtown and commercial zones, reflecting strategic placement to maximize accessibility and utility.
+
+<p>The interactive map reveals:
+- High concentration of racks in downtown and commercial areas <br>
+- Clustering patterns along major transit corridors <br>
+- Lower density in residential areas <br>
+- Clear correlation with business districts.</p>
+
+### Interactive Map Visualization
+
+```{r map_visualization, fig.cap="Fig.1 : Map of Bicycle Racks in San Francisco",  fig.align = "center", fig.width = 8.5, echo=FALSE}
+
+# Create an interactive map of bike rack locations
+
+racks_map <- bicycle_sf %>%
+  filter(!is.na(LON) & !is.na(LAT)) %>%
+  leaflet() %>%
+  addTiles() %>%
+  setView(lng = mean(bicycle_sf$LON, na.rm = TRUE), 
+          lat = mean(bicycle_sf$LAT, na.rm = TRUE), 
+          zoom = 12) %>%
+  addCircleMarkers(
+    ~LON, ~LAT,
+    radius = 3,
+    popup = ~paste(
+      "Location:", ADDRESS,
+      "<br>Racks:", RACKS,
+      "<br>Spaces:", SPACES,
+      "<br>Year Installed:", INSTALL_YR
+    ),
+    color = "blue",
+    fillOpacity = 0.6
+  )
+racks_map
+```
+![](SFBike_Rack.JPG)(source: ©sftma.com)
+
+## Descriptive Statistics
+
+### Summary Statistics
+
+```{r bicycle-location-placement, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Data quality summary
+Bicycles_Placement_Location <- data.frame(
+  Variable = c("Bicycles", "Locations", "Placements"),
+  Count = c(
+    n_distinct(bicycle_sf$OBJECTID),  # Distinct count of Bicycles
+    n_distinct(bicycle_sf$LOCATION),  # Distinct count of LOCATIONS
+    n_distinct(bicycle_sf$PLACEMENT)   # Distinct count of Placements
+  )
+)
+
+Bicycles_Placement_Location
+```
+
+
+```{r summary-stats, message=FALSE, echo=FALSE, warning=FALSE}
+
+## Creating a summary statistics table for variables of interest
+
+summary_stats <- data.frame(
+  Variable = c("RACKS", "SPACES", "NEIGHBORHOODS"),
+  Sum = c(
+    sum(bicycle_df$RACKS, na.rm = TRUE),
+    sum(bicycle_df$SPACES, na.rm = TRUE),
+    sum(bicycle_df$Neighborhoods, na.rm = TRUE)
+  ),
+    Mean = c(
+    mean(bicycle_df$RACKS, na.rm = TRUE),
+    mean(bicycle_df$SPACES, na.rm = TRUE),
+    mean(bicycle_df$Neighborhoods, na.rm = TRUE)
+  ),
+  Median = c(
+    median(bicycle_df$RACKS, na.rm = TRUE),
+    median(bicycle_df$SPACES, na.rm = TRUE),
+    median(bicycle_df$Neighborhoods, na.rm = TRUE)
+  ),
+  StD = c(
+    sd(bicycle_df$SPACES, na.rm = TRUE),
+    sd(bicycle_df$SPACES, na.rm = TRUE),
+    sd(bicycle_df$Neighborhoods, na.rm = TRUE)
+  )
+)
+
+# Convert summary stats to interactive table
+datatable(summary_stats,
+          options = list(
+            dom = 't',
+            scrollX = TRUE
+          ),
+          caption = "Table 2: Summary Statistics of Key Variables") %>% 
+  formatRound(columns = c("Sum", "Mean", "Median", "StD"), digits = 2)
+```
+
+<p>The dataset reveals a total installation of `r summary_stats$Sum[1]` racks, averaging `r summary_stats$Mean[1]` racks per installation. 
+<p>Similarly, total parking spaces provided amount to `r summary_stats$Sum[2]`, with an average of `r summary_stats$Mean[2]` spaces per rack. This indicates substantial support for cyclists in the city. <br>
+- Average number of racks per location: 2.8 racks per location. <br>
+- Total capacity (spaces): `r summary_stats$Sum[2]` <br>
+- Most common placement type: `r Bicycles_Placement_Location$Count[3]` <br>
+- There is a strong concentration in central areas with 75% of installations are in these high-traffic areas.</p>
+
+
+### Placement and Installation Types
+
+```{r placement-types, message=FALSE, echo=FALSE, warning=FALSE}
+placement_summary <- bicycle_sf %>%
+  group_by(PLACEMENT) %>%
+  summarise(
+    Total_racks = sum(RACKS),
+    Total_spaces = sum(SPACES),
+    No_of_locations = n()
+  ) %>%
+  arrange(desc(Total_racks))
+
+datatable(placement_summary,
+          options = list(
+            pageLength = 5,
+            scrollX = TRUE
+          ),
+          caption = "Table 3: Distribution by Placement Type")
+
+p1 <- ggplot(placement_summary, 
+       aes(x=reorder(PLACEMENT, Total_racks), y=Total_racks)) +
+  geom_bar(stat="identity", fill="#9b59b6") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title="Fig. 2: Bicycle Rack Placement Types",
+    x="Placement Type",
+    y="Number of Racks",
+    caption="Source: SF Open Data"
+  )
+
+p1
+```
+<p> Sidewalk is by far the most common placement type of bicycle racks.
+
+```{r installation-types, message=FALSE, echo=FALSE, warning=FALSE}
+
+# Standard vs Non-Standard Installations
+installation_types <- bicycle_sf %>%
+  filter(!is.na(INSTALL_YR)) %>%
+  filter(INSTALL_YR >= 1990 & INSTALL_YR <= 2024) %>%
+  group_by(INSTALL_YR) %>%
+  summarise(
+    Total_installations = n(),
+    Standard_installations = sum(SPACES == 2),
+    Nonstandard_installations = sum(SPACES != 2),
+    Pct_standard = Standard_installations/Total_installations * 100
+  ) %>%
+  arrange(desc(INSTALL_YR))
+
+datatable(installation_types,
+          options = list(
+            pageLength = 5,
+            scrollX = TRUE
+          ),
+          caption = "Table 4: Distribution by Placement Type") %>% 
+  formatRound(columns = c("Pct_standard"), digits = 2)
+```
+
+<p>In recent years, `r installation_types$INSTALL_YR[1]` recorded the highest number of standard installations (`r installation_types$Standard_installations[1]`), compare to other years with a percentage of `r installation_types$Pct_standard[1]`. 
+<p>This matches investments only made between `r installation_types$INSTALL_YR[24]` and `r installation_types$INSTALL_YR[19]`, in terms of numbers and proportions of standard installations.
+
+### Neighborhood Analysis
+
+
+```{r neighborhood_analysis, message=FALSE, echo=FALSE, warning=FALSE}
+
+# Installation based on neighborhoods
+neighborhood_summary <- bicycle_sf %>%
+  group_by(analysis_neighborhood) %>%
+  summarise(
+    Total_racks = sum(RACKS),
+    Total_spaces = sum(SPACES),
+    No_of_locations = n()
+  ) %>%
+  arrange(desc(Total_racks))
+
+datatable(neighborhood_summary,
+          options = list(
+            pageLength = 10,
+            order = list(list(2, 'desc')),
+            scrollX = TRUE
+          ),
+          caption = "Table 5: Neighborhood-wise Distribution of Bicycle Racks")
+
+# Plot top 10 neighborhoods
+p2 <- ggplot(head(neighborhood_summary, 10), 
+       aes(x=reorder(analysis_neighborhood, Total_racks), y=Total_racks)) +
+  geom_bar(stat="identity", fill="#2ecc71") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title="Fig.3: Top 10 Neighborhoods by Bicycle Rack Count",
+    x="Neighborhood",
+    y="Number of Racks",
+    caption="Source: SF Open Data"
+  )
+
+p2
+```
+
+<p>Top 3 neighborhoods account for more than 34% of total installations. `r neighborhood_summary$analysis_neighborhood[1]` leads with `r neighborhood_summary$Total_racks[1]` racks.
+
+### Racks installation over time
+
+#### Annual Installation Trends
+
+
+```{r temporal_analysis, message=FALSE, echo=FALSE, warning=FALSE}
+# Annual installation trends
+yearly_installations <- bicycle_sf %>%
+  group_by(INSTALL_YR) %>%
+  summarise(
+    Total_racks = sum(RACKS),
+    Total_spaces = sum(SPACES),
+    No_of_installations = n()
+  ) %>%
+  arrange(INSTALL_YR) %>%
+  filter(INSTALL_YR > 0)  # Remove invalid years
+
+p3 <- ggplot(yearly_installations, aes(x=INSTALL_YR, y=Total_racks)) +
+  geom_line(color="#2c3e50") +
+  geom_point(color="#e74c3c") +
+  theme_minimal() +
+  labs(
+    title="Fig.4: Annual Bicycle Rack Installations",
+    x="Year",
+    y="Number of Racks Installed",
+    caption="Source: SF Open Data"
+  )
+
+p3
+```
+<p>Yearly trends show significant peaks in installation activity, likely aligned with urban policy shifts or sustainability initiatives. Notably, `r max(yearly_installations$Total_racks)` installations in certain years may correspond to city-wide campaigns for promoting biking. The annual installation pattern shows an overall cascading trend, with a significant peak of rack installations in 2015. There are seasonal variations with higher installations in January.
+
+#### Monthly Installation Patterns
+
+```{r monthly_patterns, message=FALSE, echo=FALSE, warning=FALSE}
+
+# Monthly installation patterns
+monthly_installations <- bicycle_sf %>%
+  group_by(INSTALL_MO) %>%
+  summarise(
+    Total_racks = sum(RACKS),
+    Avg_racks = mean(RACKS)
+  ) %>%
+  mutate(month_name = month.abb[INSTALL_MO])
+
+p4 <- ggplot(monthly_installations, aes(x=factor(month_name, levels=month.abb), y=Total_racks)) +
+  geom_bar(stat="identity", fill="#3498db") +
+  theme_minimal() +
+  labs(
+    title="Fig.5: Monthly Installation Patterns",
+    x="Month",
+    y="Total Racks Installed",
+    caption="Source: SF Open Data"
+  )
+
+p4
+```
+<p>Monthly patterns suggest a seasonal preference for installations, with peaks in spring and summer months. This timing aligns with increased outdoor activity and higher bicycle usage during warmer weather.
+
+
+## Indepth Analysis
+
+### Correlation Analysis
+
+Strong positive correlation r = 0.98 between racks and spaces, with a p-value < 0.001, indicating this relationship is statistically significant.
+However, there is a very weak positive correlation between installation year and number of spaces, suggesting that newer installations don't necessarily mean more spaces. There is no consistent trend of increasing or decreasing spaces over time. The relationship is non-linear and highly variable, with the majority of installations across all years being standard.
+
+```{r correlation_analysis, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Correlation among numerical variables
+num_vars <- bicycle_sf %>%
+  select(RACKS, SPACES, INSTALL_YR, INSTALL_MO) %>%
+  cor(use="complete.obs")
+
+corrplot(num_vars, method="color", type="upper", 
+         addCoef.col="black", tl.col="black", tl.srt=45)
+title("Fig.6: Correlation Matrix", line=3.5, cex.main=1)
+```
+
+<p>The correlation matrix reveals a strong positive relationship between racks and spaces, as expected. Temporal variables such as year and month show weaker correlations with installations, indicating uniform distribution trends across the dataset.
+
+### Predictive Analysis
+
+#### Time Series Forecasting
+
+<p>The ARIMA model forecast suggests a steady continuation of installations over the next five years. 
+This suggests that the number of racks is the strongest predictor of space.
+Also, location (neighborhood) has significant but varying influence on rack installations.
+The model predicts stable installation rate of around 310 installations per year, with approximately 1,076 new spaces per year.</p>
+
+```{r time_series_analysis, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Predictive Model based on Seasonablity
+installations_monthly <- bicycle_sf %>%
+  filter(!is.na(INSTALL_YR), INSTALL_YR > min(yearly_installations$INSTALL_YR), INSTALL_YR <= max(yearly_installations$INSTALL_YR)) %>%
+  mutate(
+    INSTALL_DATE = as.Date(paste0(INSTALL_YR, "-01-01"))
+  ) %>%
+  group_by(INSTALL_DATE) %>%
+  summarise(
+    Total_installations = n(),
+    Total_spaces = sum(SPACES, na.rm = TRUE)
+  ) %>%
+  arrange(INSTALL_DATE)
+
+# Create time series object
+ts_racks <- ts(yearly_installations$Total_racks, 
+              start=min(yearly_installations$INSTALL_YR),
+              frequency=1)
+ts_installations <- ts(installations_monthly$Total_installations, 
+                      frequency = 1)
+ts_spaces <- ts(installations_monthly$Total_spaces,
+                frequency = 1)
+
+# Fit ARIMA model
+arima_racks <- auto.arima(ts_racks)
+arima_installations <- auto.arima(ts_installations, seasonal = FALSE)
+arima_spaces <- auto.arima(ts_spaces, seasonal = FALSE)
+
+# Generate forecast
+forecast_values <- forecast(arima_racks, h=5)
+
+# Plot forecast
+autoplot(forecast_values) +
+  theme_minimal() +
+  labs(
+    title="Fig.7: Forecast of Bicycle Rack Installations",
+    x="Year",
+    y="Number of Racks",
+    caption="Source: San Francisco Open Data"
+  )
+
+
+# Generate forecasts
+forecast_installations <- forecast(arima_installations, h = 5)
+forecast_spaces <- forecast(arima_spaces, h = 5)
+
+forecast_table <- data.frame(
+  Year = 2024:2028,
+  Predicted_Installations = round(forecast_installations$mean, 0),
+  Lower_CI_Installations = round(forecast_installations$lower[,"95%"], 0),
+  Upper_CI_Installations = round(forecast_installations$upper[,"95%"], 0),
+  Predicted_Spaces = round(forecast_spaces$mean, 0),
+  Lower_CI_Spaces = round(forecast_spaces$lower[,"95%"], 0),
+  Upper_CI_Spaces = round(forecast_spaces$upper[,"95%"], 0)
+)
+
+datatable(forecast_table,
+          options = list(
+            pageLength = 10,
+            order = list(list(2, 'desc')),
+            scrollX = TRUE
+          ),
+          caption = "Table 6: 5-Year Installations Forecast")
+
+```
+
+
+## Conclusion & Recommendations
+
+### Conclusion
+The analysis of San Francisco's bicycle rack installations provides valuable insights into spatial distribution, temporal trends, and neighborhood prioritization. The findings emphasize strategic placement in high-traffic areas, seasonality in installations, and alignment with urban sustainability goals. Recommendations include leveraging forecasting models for future planning and addressing underserved neighborhoods to enhance accessibility and encourage cycling across the city.
+
+<p>The Mission district leads by far with `r neighborhood_summary$Total_racks[1]` racks providing `r neighborhood_summary$Total_spaces[1]` parking spaces across `r neighborhood_summary$No_of_locations[1]` locations. Financial District/South Beach and South of Market follow as major hubs for bicycle parking. There's a good distribution across residential areas like Sunset/Parkside. Mission Bay shows high density of racks relative to its locations (`r neighborhood_summary$Total_racks[5]` racks across `r neighborhood_summary$No_of_locations[5]`).
+
+<p>This analysis provides insights into the distribution and characteristics of bicycle parking racks in San Francisco: <br>
+1. The data shows the spatial distribution of bike racks across different neighborhoods <br>
+2. We can observe installation trends over time <br>
+3. Different placement types are analyzed <br>
+4. The interactive map allows for exploration of specific locations.</p>
+
+
+### Recommendations
+
+Based on the analysis, underserved neighborhoods could be priority Areas for new installations.
+Likewise, installations could be optimized based on seasonal patterns, especially during spring and summer months, focusing on high-impact placement types, namely sidewalk and roadway. There should be a balance between commercial and residential areas.
+   
+<p>To optimize future installations, the city should analyze potential high-demand areas not yet served in cycling infrastructure, reinforcing the city's commitment to sustainable transportation.
+Strategically, the city may consider establishing and operationalizing a 5-year plan with a maintenance and replacement to meet the increasing demand for cycling infrastructure.
+
+
+
+```{r database-creation, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+### Creation of an RSQLite database easy reference
+
+# Create SQLite database and tables
+con <- dbConnect(RSQLite::SQLite(), "bicycle_racks.db")
+
+# Create main racks table
+bike_racks <- bicycle_sf %>%
+  select(OBJECTID, ADDRESS, LOCATION, STREET, PLACEMENT, RACKS, SPACES, Neighborhoods,
+         INSTALL_DATE, LAT, LON)
+
+# Create locations table
+locations <- bicycle_sf %>%
+  select(OBJECTID, analysis_neighborhood, supervisor_district) %>%
+  distinct()
+
+# Write tables to SQLite database
+dbWriteTable(con, "bike_racks", bike_racks, overwrite = TRUE)
+dbWriteTable(con, "locations", locations, overwrite = TRUE)
+
+```
+
+
+```{r sql-test-connection, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Database  check
+RSQLite::dbGetQuery(conn = con, statement = "SELECT * FROM bike_racks LIMIT 5")
+
+
+```
+
+
+```{r closing-connection, include=FALSE, message=FALSE, warning=FALSE}
+
+# Closing connection
+dbDisconnect(con)
+```
