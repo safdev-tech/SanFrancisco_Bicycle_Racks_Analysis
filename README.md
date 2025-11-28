@@ -1,4 +1,4 @@
-San Francisco Bicycle Racks Installation Analysis Steps
+# San Francisco Bicycle Racks Installation Analysis
 
 This project explores the bicycle rack installations across San Francisco, examining installation patterns, geographical distribution, and temporal trends. 
 The analysis aims to: <br>
